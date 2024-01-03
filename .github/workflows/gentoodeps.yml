@@ -1,0 +1,90 @@
+name: Create go deps
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream tag to use (optional - default last in refname order)'
+        type: string
+
+jobs:
+  gentoodeps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.21.x
+
+      - name: Checkout Upstream
+        uses: actions/checkout@v4
+        with:
+          repository: 'terraform-linters/tflint'
+          path: 'tflint'
+          fetch-depth: 0
+
+      # - name: Fetch tags
+      #   working-directory: ./task
+      #   run: git fetch --tags
+
+      - name: Find latest tag and set variables
+        working-directory: ./tflint
+        run: |
+          if [ -z "${{ inputs.upstream_tag }}" ]; then
+            t=$( git tag  --sort=v:refname --list 'v[0-9]*' | tail -1 )
+          else
+            t="${{ inputs.upstream_tag }}"
+          fi
+          echo "upstream_tag=${t}" >> $GITHUB_ENV
+          echo "short_tag=${t:1}" >> $GITHUB_ENV 
+          echo "date=$( date --iso-8601=seconds )" >> $GITHUB_ENV
+
+      - name: Checkout upstream tag
+        working-directory: ./tflint
+        run: git checkout ${{ env.upstream_tag }}
+
+      - name: Vendor modules
+        run: go mod vendor
+        working-directory: ./tflint
+
+      - name: Rename upstream dir
+        run: mv tflint tflint-"${{env.short_tag}}"
+
+      - name: Create deps tarball
+        run: tar --create --auto-compress --file tflint-${{ env.upstream_tag }}-deps.tar.xz tflint-${{ env.short_tag }}/vendor
+
+      - name: Checkout Local
+        uses: actions/checkout@v4
+        with:
+          path: local
+
+      - name: Changelog
+        run: 'echo "Upstream tag: ${{ env.upstream_tag }} tar creation: ${{ env.date }}" > ./local/Changelog'
+
+      - name: Create commit and tag
+        uses: EndBug/add-and-commit@v9
+        with:
+          cwd: './local'
+          message: 'Gentoo deps file ${{ env.upstream_tag }}'
+          tag: ${{ env.upstream_tag }} --force
+          tag_push: '--force'
+
+      - name: Create release and publish tarball
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: tflint-${{ env.upstream_tag }}-deps.tar.xz
+          bodyFile: ./local/Changelog
+          allowUpdates: true
+          tag: ${{ env.upstream_tag }}
+
+      - name: Remove old releases
+        uses: dev-drprasad/delete-older-releases@v0.3.1
+        with:
+          keep_latest: 3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
